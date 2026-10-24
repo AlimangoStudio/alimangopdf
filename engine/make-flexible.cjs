@@ -231,6 +231,8 @@ function cleanWithQpdf(inp) {
   // pdf-lib writes the size it computed (huge for empty boxes) into each DA; put auto back so typing works
   for (const n of tall) { const a = form.getTextField(n).acroField; a.setDefaultAppearance(AUTO_DA); a.getWidgets().forEach(w => w.setDefaultAppearance(AUTO_DA)); }
   form.acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.False);
+  doc.setProducer('AlimangoPDF by Alimango Studio');
+  doc.setCreator('AlimangoPDF');
   fs.writeFileSync(out, await doc.save({ updateFieldAppearances: false }));
   console.log(`form repair: ${repaired.relinked} fields relinked to their visible boxes, ${repaired.added} loose boxes registered`);
   console.log(merged.join('\n') || 'no row stacks found');

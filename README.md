@@ -54,3 +54,5 @@ node make-blank.cjs filled.pdf blank.pdf       # clears every field and tick, ke
 - Built on [pdf-lib](https://github.com/Hopding/pdf-lib) (MIT).
 
 MIT licensed. Made by Alimango Studio.
+
+The Alimango name and the Alimango crab mark (the app icon) are trademarks of Alimango Studio. The MIT licence covers the code only, not the name or the mark. Forks must use their own name and icon.
