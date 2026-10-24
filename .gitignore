@@ -1,4 +1,5 @@
 node_modules/
 *.pdf
+!samples/*.pdf
 *.app/
 .DS_Store
