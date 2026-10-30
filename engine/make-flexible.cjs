@@ -4,9 +4,9 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  PDFDocument, StandardFonts, PDFName, PDFBool, PDFNumber, PDFTextField, PDFCheckBox, PDFDict, PDFArray, PDFStream,
+  PDFDocument, StandardFonts, PDFName, PDFBool, PDFNumber, PDFTextField, PDFCheckBox, PDFDict, PDFArray, PDFStream, TextAlignment,
   beginMarkedContent, endMarkedContent, pushGraphicsState, popGraphicsState, rectangle, clip, endPath,
-  beginText, endText, setFillingGrayscaleColor, setFontAndSize, setLineHeight, moveText, showText, nextLine,
+  beginText, endText, setFillingGrayscaleColor, setFontAndSize, setLineHeight, moveText, showText,
 } = require(path.join(__dirname, 'node_modules', 'pdf-lib'));
 
 const ROW_MIN_WIDTH = 180;   // narrower stacks (table cells etc.) are left alone
@@ -47,16 +47,22 @@ function fitSize(font, text, width, height) {
 }
 
 // Draws the widget's printed look ourselves: pdf-lib's multi-line layout can run past the right edge.
-function drawAppearance(doc, font, widget, text) {
+function drawAppearance(doc, font, widget, text, align = TextAlignment.Left) {
   const { width: W, height: H } = widget.getRectangle();
   const PAD = 3, TW = (W - 2 * PAD) * 0.97; // viewers measure Helvetica up to ~1% wider than pdf-lib
   const size = fitSize(font, text, TW, H - 2 * PAD);
   const lh = lineHeight(font, size);
   const ops = [beginMarkedContent('Tx'), pushGraphicsState(), rectangle(1, 1, W - 2, H - 2), clip(), endPath()];
   if (text.trim()) {
-    ops.push(beginText(), setFillingGrayscaleColor(0), setFontAndSize('F0', size), setLineHeight(lh),
-      moveText(PAD, H - PAD - font.heightAtSize(size, { descender: false })));
-    for (const ln of wrapLines(font, text, TW, size)) ops.push(showText(font.encodeText(ln)), nextLine());
+    ops.push(beginText(), setFillingGrayscaleColor(0), setFontAndSize('F0', size), setLineHeight(lh));
+    // each line starts at its own x (centre/right), moved relative to the line before
+    let x = 0, first = true;
+    for (const ln of wrapLines(font, text, TW, size)) {
+      const room = TW - font.widthOfTextAtSize(ln, size);
+      const nx = PAD + (align === TextAlignment.Center ? room / 2 : align === TextAlignment.Right ? room : 0);
+      ops.push(first ? moveText(nx, H - PAD - font.heightAtSize(size, { descender: false })) : moveText(nx - x, -lh), showText(font.encodeText(ln)));
+      x = nx; first = false;
+    }
     ops.push(endText());
   }
   ops.push(popGraphicsState(), endMarkedContent());
@@ -124,6 +130,24 @@ function unlockFields(form) {
     }
   }
   return n;
+}
+
+// Alignment, chosen while filling: text that starts with ^ is centred, with > right-aligned (the mark is removed).
+// Everything else is left-aligned, the default (owner, 2026-10-30). To keep a real leading ^ or >, type a space
+// before it; that space is removed.
+const MARKS = { '^': TextAlignment.Center, '>': TextAlignment.Right };
+function applyAlignment(form) {
+  let marked = 0;
+  for (const f of form.getFields()) {
+    if (!(f instanceof PDFTextField)) continue;
+    const text = f.getText() || '';
+    const align = MARKS[text[0]] ?? TextAlignment.Left;
+    if (text[0] in MARKS) { f.setText(text.slice(1).replace(/^ +/, '') || undefined); marked++; }
+    else if (text[0] === ' ' && text[1] in MARKS) f.setText(text.slice(1));   // the space only protected the mark
+    f.setAlignment(align);
+    for (const w of f.acroField.getWidgets()) if (w.dict.has(PDFName.of('Q'))) w.dict.set(PDFName.of('Q'), PDFNumber.of(align));
+  }
+  return marked;
 }
 
 // Removes a field by hand: pdf-lib's removeField leaves refs in /Annots and throws on boxes without /AP.
@@ -288,6 +312,9 @@ function cleanWithQpdf(inp) {
     merged.push(`${name}: ${old.size} row boxes -> 1 paragraph box on page(s) ${rects.map(r => r.page + 1).join(', ')}`);
   }
 
+  // 1b. alignment marks typed while filling (^ centre, > right); everything else left
+  const aligned = applyAlignment(form);
+
   // 2. tall boxes: wrap + auto-shrink font
   const tall = [];
   for (const f of form.getFields()) {
@@ -303,7 +330,7 @@ function cleanWithQpdf(inp) {
   // pdf-lib's own multi-line auto-size neither shrinks to the box height nor stays inside the width,
   // so the wrap+shrink boxes get appearances drawn by us; their DA stays 0 (auto) for the next editor.
   form.updateFieldAppearances(font);
-  for (const n of tall) for (const { w } of widgetsOf(form.getTextField(n))) drawAppearance(doc, font, w, form.getTextField(n).getText() || '');
+  for (const n of tall) { const f = form.getTextField(n); for (const { w } of widgetsOf(f)) drawAppearance(doc, font, w, f.getText() || '', f.getAlignment()); }
   // pdf-lib writes the size it computed (huge for empty boxes) into each DA; put auto back so typing works
   for (const n of tall) { const a = form.getTextField(n).acroField; a.setDefaultAppearance(AUTO_DA); a.getWidgets().forEach(w => w.setDefaultAppearance(AUTO_DA)); }
   form.acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.False);
@@ -314,6 +341,7 @@ function cleanWithQpdf(inp) {
   console.log(`unlocked: ${unlocked} read-only fields; stacked copies removed: ${copies.length}${copies.length ? ' (' + copies.join(', ') + ')' : ''}`);
   console.log(filled.skipped ? `new fields: skipped, ${filled.skipped}` : `new fields on unmapped boxes: ${filled.text} text, ${filled.check} tick`);
   console.log(merged.join('\n') || 'no row stacks found');
+  console.log(`alignment marks applied: ${aligned} (all other boxes left-aligned)`);
   console.log(`wrap + auto-shrink: ${tall.length} boxes (${tall.join(', ')})`);
   console.log('saved:', out);
 })().catch(e => { console.error('ERROR:', e.message); process.exit(1); });

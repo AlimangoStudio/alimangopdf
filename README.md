@@ -9,6 +9,7 @@ Click the app and choose a PDF, or drop PDFs on it. For each file it writes `<na
 - **Wraps and shrinks text.** Tall text boxes become multi-line, and the font shrinks (11 pt down to 4 pt) until the text fits inside the box.
 - **Merges row boxes.** A stack of numbered one-line boxes, such as a numbered list of note lines, becomes one paragraph box. The existing text is kept in row order.
 - **Makes every box fillable.** Read-only fields are unlocked, an unnamed copy stacked on a named field is removed, and every printed box, blank line, `|_|_|` date and tick box without a field gets one (named `p<page> blank …` or `p<page> tick … (auto)`). It finds them from how the page looks, so it works on any form, even a flattened one.
+- **Aligns text the way you mark it.** Every box is left-aligned. While filling, start the text with `^` to centre it or `>` to right-align it (`>H41007832`). The PRINT copy is aligned that way and the mark is removed. To print a real leading `^` or `>` (such as `>100 mg/dL`), type a space before it.
 - **Repairs forms saved by macOS Preview.** It points fields back at the boxes the pages actually show, registers stray text boxes, drops broken appearance entries, and rewrites unreadable streams with `qpdf` first.
 
 It only edits form fields. The printed page content is left as it is.
