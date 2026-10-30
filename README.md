@@ -8,6 +8,7 @@ Click the app and choose a PDF, or drop PDFs on it. For each file it writes `<na
 
 - **Wraps and shrinks text.** Tall text boxes become multi-line, and the font shrinks (11 pt down to 4 pt) until the text fits inside the box.
 - **Merges row boxes.** A stack of numbered one-line boxes, such as a numbered list of note lines, becomes one paragraph box. The existing text is kept in row order.
+- **Makes every box fillable.** Read-only fields are unlocked, an unnamed copy stacked on a named field is removed, and every printed box, blank line, `|_|_|` date and tick box without a field gets one (named `p<page> blank …` or `p<page> tick … (auto)`). It finds them from how the page looks, so it works on any form, even a flattened one.
 - **Repairs forms saved by macOS Preview.** It points fields back at the boxes the pages actually show, registers stray text boxes, drops broken appearance entries, and rewrites unreadable streams with `qpdf` first.
 
 It only edits form fields. The printed page content is left as it is.
@@ -45,6 +46,7 @@ If you rebuild, the previous AlimangoPDF.app goes to the Trash.
 cd engine && npm ci
 node make-flexible.cjs form.pdf [output.pdf]   # flexible template, or the PRINT copy of a filled one
 node make-blank.cjs filled.pdf blank.pdf       # clears every field and tick, keeps the layout
+swiftc -O detect-boxes.swift -o detect-boxes   # the box finder (Xcode Command Line Tools); without it no new fields are added
 ```
 
 ## Notes

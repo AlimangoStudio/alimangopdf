@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  PDFDocument, StandardFonts, PDFName, PDFBool, PDFTextField, PDFDict, PDFArray, PDFStream,
+  PDFDocument, StandardFonts, PDFName, PDFBool, PDFNumber, PDFTextField, PDFCheckBox, PDFDict, PDFArray, PDFStream,
   beginMarkedContent, endMarkedContent, pushGraphicsState, popGraphicsState, rectangle, clip, endPath,
   beginText, endText, setFillingGrayscaleColor, setFontAndSize, setLineHeight, moveText, showText, nextLine,
 } = require(path.join(__dirname, 'node_modules', 'pdf-lib'));
@@ -109,6 +109,89 @@ function relinkVisibleWidgets(doc, pages) {
   return { relinked, added };
 }
 
+// Every box must take typing and ticks: clear the read-only flag on fields (Ff bit 1) and the
+// read-only/locked flags on their boxes (annotation F bits 7 and 8).
+function unlockFields(form) {
+  let n = 0;
+  for (const f of form.getFields()) {
+    for (let d = f.acroField.dict; d instanceof PDFDict; d = d.lookup(PDFName.of('Parent'))) {
+      const ff = d.lookup(PDFName.of('Ff'));
+      if (ff && (ff.asNumber() & 1)) { d.set(PDFName.of('Ff'), PDFNumber.of(ff.asNumber() & ~1)); n++; }
+    }
+    for (const w of f.acroField.getWidgets()) {
+      const fl = w.dict.lookup(PDFName.of('F'));
+      if (fl && (fl.asNumber() & 192)) w.dict.set(PDFName.of('F'), PDFNumber.of(fl.asNumber() & ~192));
+    }
+  }
+  return n;
+}
+
+// Removes a field by hand: pdf-lib's removeField leaves refs in /Annots and throws on boxes without /AP.
+function dropField(doc, form, pages, f) {
+  const fieldsArr = form.acroForm.dict.lookup(PDFName.of('Fields'), PDFArray);
+  const fieldRef = f.ref.toString();
+  const widgetRefs = f.acroField.getWidgets().map(w => doc.context.getObjectRef(w.dict)).filter(Boolean);
+  const drop = new Set([fieldRef, ...widgetRefs.map(String)]);
+  for (const p of pages) {
+    const annots = p.node.Annots(); if (!annots) continue;
+    for (let i = annots.size() - 1; i >= 0; i--) if (drop.has(annots.get(i).toString())) annots.remove(i);
+  }
+  for (let i = fieldsArr.size() - 1; i >= 0; i--) if (fieldsArr.get(i).toString() === fieldRef) fieldsArr.remove(i);
+  const parent = f.acroField.dict.lookup(PDFName.of('Parent'));
+  const pk = parent instanceof PDFDict ? parent.lookup(PDFName.of('Kids')) : undefined;
+  if (pk instanceof PDFArray) for (let i = pk.size() - 1; i >= 0; i--) if (pk.get(i).toString() === fieldRef) pk.remove(i);
+}
+
+const overlap = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x))
+  * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+
+// One box, one field: an unnamed copy ("Text63", "Check Box6") lying on a named field of the same kind
+// is removed; what was typed or ticked in the copy moves to the named field first.
+function dropStackedCopies(doc, form, pages, pageOfWidget) {
+  const generic = n => /^(Text|Check Box|Text Field|untitled)\s*\d+$/i.test(n);
+  const boxes = f => f.acroField.getWidgets().map(w => ({ page: pageOfWidget(w), ...w.getRectangle() }));
+  const fields = form.getFields().filter(f => f instanceof PDFTextField || f instanceof PDFCheckBox);
+  const gone = [];
+  for (const copy of fields.filter(f => generic(f.getName()))) {
+    const cb = boxes(copy); if (cb.length !== 1) continue;
+    const keep = fields.find(f => f !== copy && !generic(f.getName()) && f.constructor === copy.constructor && !gone.includes(f)
+      && boxes(f).some(b => b.page === cb[0].page && overlap(b, cb[0]) > 0.9 * Math.min(b.width * b.height, cb[0].width * cb[0].height)));
+    if (!keep) continue;
+    if (copy instanceof PDFTextField && copy.getText() && !keep.getText()) keep.setText(copy.getText());
+    if (copy instanceof PDFCheckBox && copy.isChecked() && !keep.isChecked()) keep.check();
+    dropField(doc, form, pages, copy);
+    gone.push(copy);
+  }
+  return gone.map(f => f.getName());
+}
+
+// Boxes, lines and tick boxes printed on the page with no field on them get one. detect-boxes (Swift, next to this
+// file) finds them from how the page looks; without it this step is skipped.
+function addMissingFields(doc, form, pages, inp, pageOfWidget, font) {
+  const bin = path.join(__dirname, 'detect-boxes');
+  if (!fs.existsSync(bin)) return { skipped: 'detect-boxes not built (swiftc -O detect-boxes.swift -o detect-boxes)' };
+  let found;
+  try { found = JSON.parse(require('child_process').execFileSync(bin, [inp], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 << 20 })); }
+  catch { return { skipped: 'detect-boxes could not read this PDF' }; }
+  const taken = [];
+  for (const f of form.getFields()) for (const w of f.acroField.getWidgets()) taken.push({ page: pageOfWidget(w), ...w.getRectangle() });
+  const added = { text: 0, check: 0 }, count = {};
+  // a spot found as a tick box in one pass and as a blank in another is a tick box
+  found.sort((a, b) => (a.kind === 'check' ? 0 : 1) - (b.kind === 'check' ? 0 : 1));
+  for (const c of found) {
+    const r = { page: c.page, x: c.x, y: c.y, width: c.w, height: c.h };
+    if (!pages[r.page] || taken.some(t => t.page === r.page && overlap(t, r) > 0.3 * Math.min(t.width * t.height, r.width * r.height))) continue;
+    taken.push(r);
+    const n = count[r.page] = (count[r.page] || 0) + 1;
+    const name = `p${r.page + 1} ${c.kind === 'check' ? 'tick' : 'blank'} ${String(n).padStart(3, '0')} (auto)`;  // no trailing digits: never a row stack
+    const box = { x: r.x + 0.5, y: r.y + 0.5, width: r.width - 1, height: r.height - 1, borderWidth: 0, borderColor: undefined, backgroundColor: undefined };
+    if (c.kind === 'check') form.createCheckBox(name).addToPage(pages[r.page], box);
+    else form.createTextField(name).addToPage(pages[r.page], { ...box, font });
+    added[c.kind === 'check' ? 'check' : 'text']++;
+  }
+  return added;
+}
+
 // Files saved by macOS Preview can have streams without /Length that pdf-lib reads wrongly
 // (pages come out blank). qpdf rewrites them cleanly first; exit code 3 means "fixed with warnings".
 function cleanWithQpdf(inp) {
@@ -137,6 +220,13 @@ function cleanWithQpdf(inp) {
     const ref = doc.context.getObjectRef(w.dict);
     return { w, rect: w.getRectangle(), page: ref ? pageOf.get(ref.toString()) : undefined };
   });
+  const pageOfWidget = w => { const ref = doc.context.getObjectRef(w.dict); return ref ? pageOf.get(ref.toString()) : undefined; };
+
+  // 0. every box takes input: unlock, one field per box, and a field on every printed box and blank
+  const unlocked = unlockFields(form);
+  const copies = dropStackedCopies(doc, form, pages, pageOfWidget);
+  const filled = addMissingFields(doc, form, pages, inp, pageOfWidget, font);
+  pages.forEach((p, i) => (p.node.Annots()?.asArray() || []).forEach(r => pageOf.set(r.toString(), i)));
 
   // 1. find stacks of numbered one-line boxes, per page
   const stacks = new Map();
@@ -189,21 +279,7 @@ function cleanWithQpdf(inp) {
       const x1 = Math.max(...all.map(r => r.x + r.width)), y1 = Math.max(...all.map(r => r.y + r.height));
       return { page: p.main.page, x: x0 + 1, y: y0, width: x1 - x0 - 5, height: y1 - y0 };
     });
-    // removed by hand: pdf-lib's removeField leaves refs in /Annots and throws on boxes without /AP
-    const fieldsArr = form.acroForm.dict.lookup(PDFName.of('Fields'), PDFArray);
-    for (const f of old) {
-      const fieldRef = f.ref.toString();
-      const widgetRefs = f.acroField.getWidgets().map(w => doc.context.getObjectRef(w.dict)).filter(Boolean);
-      const drop = new Set([fieldRef, ...widgetRefs.map(String)]);
-      for (const p of pages) {
-        const annots = p.node.Annots(); if (!annots) continue;
-        for (let i = annots.size() - 1; i >= 0; i--) if (drop.has(annots.get(i).toString())) annots.remove(i);
-      }
-      for (let i = fieldsArr.size() - 1; i >= 0; i--) if (fieldsArr.get(i).toString() === fieldRef) fieldsArr.remove(i);
-      const parent = f.acroField.dict.lookup(PDFName.of('Parent'));
-      const pk = parent instanceof PDFDict ? parent.lookup(PDFName.of('Kids')) : undefined;
-      if (pk instanceof PDFArray) for (let i = pk.size() - 1; i >= 0; i--) if (pk.get(i).toString() === fieldRef) pk.remove(i);
-    }
+    for (const f of old) dropField(doc, form, pages, f);
     for (const r of rects) tf.addToPage(pages[r.page], { x: r.x, y: r.y, width: r.width, height: r.height, borderWidth: 0, font });
     tf.enableMultiline();
     tf.enableScrolling();
@@ -235,6 +311,8 @@ function cleanWithQpdf(inp) {
   doc.setCreator('AlimangoPDF');
   fs.writeFileSync(out, await doc.save({ updateFieldAppearances: false }));
   console.log(`form repair: ${repaired.relinked} fields relinked to their visible boxes, ${repaired.added} loose boxes registered`);
+  console.log(`unlocked: ${unlocked} read-only fields; stacked copies removed: ${copies.length}${copies.length ? ' (' + copies.join(', ') + ')' : ''}`);
+  console.log(filled.skipped ? `new fields: skipped, ${filled.skipped}` : `new fields on unmapped boxes: ${filled.text} text, ${filled.check} tick`);
   console.log(merged.join('\n') || 'no row stacks found');
   console.log(`wrap + auto-shrink: ${tall.length} boxes (${tall.join(', ')})`);
   console.log('saved:', out);
