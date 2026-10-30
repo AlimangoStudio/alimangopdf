@@ -18,6 +18,9 @@ ENGINE="$BUILD/AlimangoPDF.app/Contents/Resources/engine"
 mkdir -p "$ENGINE"
 cp engine/make-flexible.cjs engine/make-blank.cjs engine/package.json engine/package-lock.json "$ENGINE/"
 (cd "$ENGINE" && npm ci --omit=dev --no-audit --no-fund --silent)
+# box finder: gives fields to printed boxes, blanks and tick boxes that have none (needs the Xcode Command Line Tools)
+if command -v swiftc >/dev/null; then swiftc -O engine/detect-boxes.swift -o "$ENGINE/detect-boxes"
+else echo "warning: swiftc not found (xcode-select --install); unmapped boxes will not get fields"; fi
 
 # Alimango Studio mark: the app icon is built from the data at the end of this file and must match its fingerprint.
 MARK="$BUILD/mark.png"

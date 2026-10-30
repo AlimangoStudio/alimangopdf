@@ -3,3 +3,4 @@ node_modules/
 !samples/*.pdf
 *.app/
 .DS_Store
+engine/detect-boxes
